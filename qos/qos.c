@@ -15,10 +15,10 @@ qos_meter_init(void)
 {
     /* to do */
     struct rte_meter_srtcm_params app_srtcm_params[APP_FLOWS_MAX] = {
-        {.cir = 160000000000,  .cbs = 160000, .ebs = 160000},
-        {.cir = 80000000000,  .cbs = 80000, .ebs = 80000},
-        {.cir = 40000000000,  .cbs = 40000, .ebs = 40000},
-        {.cir = 20000000000,  .cbs = 20000, .ebs = 20000}
+        {.cir = 160000000000,  .cbs = 16000000, .ebs = 16000000},
+        {.cir = 80000000000,  .cbs = 8000000, .ebs = 8000000},
+        {.cir = 40000000000,  .cbs = 4000000, .ebs = 4000000},
+        {.cir = 20000000000,  .cbs = 2000000, .ebs = 2000000}
     };
     int ret;
 
