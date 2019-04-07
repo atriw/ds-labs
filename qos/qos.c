@@ -15,10 +15,10 @@ qos_meter_init(void)
 {
     /* to do */
     struct rte_meter_srtcm_params app_srtcm_params[APP_FLOWS_MAX] = {
-        {.cir=160000000000, .cbs=120000, .ebs=40000},
-        {.cir=80000000000, .cbs=60000, .ebs=20000},
-        {.cir=40000000000, .cbs=30000, .ebs=10000},
-        {.cir=20000000000, .cbs=15000, .ebs=5000}
+        {.cir = 171800000,  .cbs = 160000000, .ebs = 170000000},
+        {.cir = 85900000,  .cbs = 80000000, .ebs = 85000000},
+        {.cir = 42850000,  .cbs = 40000000, .ebs = 42000000},
+        {.cir = 21425000,  .cbs = 20000000, .ebs = 21000000}
     };
     int ret;
 
@@ -53,25 +53,25 @@ qos_dropper_init(void)
     /* to do */
     struct rte_red_params app_red_params[APP_FLOWS_MAX][e_RTE_METER_COLORS] = {
         {
-            {.min_th = 750, .max_th = 751, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 1, .max_th = 500, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 0, .max_th = 1, .maxp_inv = 10, .wq_log2 = 9}
+            {.min_th = 220, .max_th = 230, .maxp_inv = 50, .wq_log2 = 8},
+            {.min_th = 1, .max_th = 50, .maxp_inv = 20, .wq_log2 = 8},
+            {.min_th = 1, .max_th = 2, .maxp_inv = 1, .wq_log2 = 8}
         },
         {
-            {.min_th = 325, .max_th = 326, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 1, .max_th = 250, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 0, .max_th = 1, .maxp_inv = 10, .wq_log2 = 9}
+            {.min_th = 105, .max_th = 115, .maxp_inv = 10, .wq_log2 = 4},
+            {.min_th = 1, .max_th = 25, .maxp_inv = 10, .wq_log2 = 4},
+            {.min_th = 1, .max_th = 2, .maxp_inv = 1, .wq_log2 = 4}
         },
         {
-            {.min_th = 162, .max_th = 163, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 1, .max_th = 125, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 0, .max_th = 1, .maxp_inv = 10, .wq_log2 = 9}
+            {.min_th = 52, .max_th = 62, .maxp_inv = 10, .wq_log2 = 2},
+            {.min_th = 1, .max_th = 12, .maxp_inv = 5, .wq_log2 = 2},
+            {.min_th = 1, .max_th = 2, .maxp_inv = 1, .wq_log2 = 2}
         },
         {
-            {.min_th = 81, .max_th = 82, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 1, .max_th = 62, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 0, .max_th = 1, .maxp_inv = 10, .wq_log2 = 9}
-        },
+            {.min_th = 21, .max_th = 31, .maxp_inv = 10, .wq_log2 = 1},
+            {.min_th = 1, .max_th = 6, .maxp_inv = 3, .wq_log2 = 1},
+            {.min_th = 1, .max_th = 2, .maxp_inv = 1, .wq_log2 = 1}
+        }
     };
     for (int i = 0; i < APP_FLOWS_MAX; i++) {
         for (int j = 0; j < e_RTE_METER_COLORS; j++) {
