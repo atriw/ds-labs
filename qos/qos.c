@@ -15,10 +15,10 @@ qos_meter_init(void)
 {
     /* to do */
     struct rte_meter_srtcm_params app_srtcm_params[APP_FLOWS_MAX] = {
-        {.cir=160000000000, .cbs=80000, .ebs=80000},
-        {.cir=80000000000, .cbs=40000, .ebs=40000},
-        {.cir=40000000000, .cbs=20000, .ebs=20000},
-        {.cir=20000000000, .cbs=10000, .ebs=10000}
+        {.cir=160000000000, .cbs=120000, .ebs=40000},
+        {.cir=80000000000, .cbs=60000, .ebs=20000},
+        {.cir=40000000000, .cbs=30000, .ebs=10000},
+        {.cir=20000000000, .cbs=15000, .ebs=5000}
     };
     int ret;
 
@@ -54,22 +54,22 @@ qos_dropper_init(void)
     struct rte_red_params app_red_params[APP_FLOWS_MAX][e_RTE_METER_COLORS] = {
         {
             {.min_th = 1000, .max_th = 1001, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 1000, .max_th = 1001, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 1, .max_th = 500, .maxp_inv = 10, .wq_log2 = 9},
             {.min_th = 0, .max_th = 1, .maxp_inv = 10, .wq_log2 = 9}
         },
         {
             {.min_th = 500, .max_th = 501, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 500, .max_th = 501, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 1, .max_th = 250, .maxp_inv = 10, .wq_log2 = 9},
             {.min_th = 0, .max_th = 1, .maxp_inv = 10, .wq_log2 = 9}
         },
         {
             {.min_th = 250, .max_th = 251, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 250, .max_th = 251, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 1, .max_th = 125, .maxp_inv = 10, .wq_log2 = 9},
             {.min_th = 0, .max_th = 1, .maxp_inv = 10, .wq_log2 = 9}
         },
         {
             {.min_th = 125, .max_th = 126, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 125, .max_th = 126, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 1, .max_th = 62, .maxp_inv = 10, .wq_log2 = 9},
             {.min_th = 0, .max_th = 1, .maxp_inv = 10, .wq_log2 = 9}
         },
     };
