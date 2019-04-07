@@ -84,6 +84,7 @@ qos_dropper_init(void)
         }
         qsize[i] = 0;
     }
+    return 0;
 }
 
 int
@@ -100,7 +101,7 @@ qos_dropper_run(uint32_t flow_id, enum qos_color color, uint64_t time)
     }
     last_time = time;
     int ret;
-    if ((ret = rte_red_enqueue(&app_red_config[flow_id][color], &app_red_data[flow_id][color], time)) == 0)
+    if ((ret = rte_red_enqueue(&app_red_config[flow_id][color], &app_red_data[flow_id][color], qsize[flow_id], time)) == 0)
         qsize[flow_id]++;
     return ret;
 }
