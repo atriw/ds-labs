@@ -53,23 +53,23 @@ qos_dropper_init(void)
     /* to do */
     struct rte_red_params app_red_params[APP_FLOWS_MAX][e_RTE_METER_COLORS] = {
         {
-            {.min_th = 220, .max_th = 230, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 1, .max_th = 50, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 1000, .max_th = 1001, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 1, .max_th = 500, .maxp_inv = 10, .wq_log2 = 9},
             {.min_th = 1, .max_th = 2, .maxp_inv = 10, .wq_log2 = 9}
         },
         {
-            {.min_th = 105, .max_th = 115, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 1, .max_th = 25, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 500, .max_th = 501, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 1, .max_th = 250, .maxp_inv = 10, .wq_log2 = 9},
             {.min_th = 1, .max_th = 2, .maxp_inv = 10, .wq_log2 = 9}
         },
         {
-            {.min_th = 52, .max_th = 62, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 1, .max_th = 12, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 250, .max_th = 251, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 1, .max_th = 125, .maxp_inv = 10, .wq_log2 = 9},
             {.min_th = 1, .max_th = 2, .maxp_inv = 10, .wq_log2 = 9}
         },
         {
-            {.min_th = 21, .max_th = 31, .maxp_inv = 10, .wq_log2 = 9},
-            {.min_th = 1, .max_th = 6, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 125, .max_th = 126, .maxp_inv = 10, .wq_log2 = 9},
+            {.min_th = 1, .max_th = 62, .maxp_inv = 10, .wq_log2 = 9},
             {.min_th = 1, .max_th = 2, .maxp_inv = 10, .wq_log2 = 9}
         }
     };
