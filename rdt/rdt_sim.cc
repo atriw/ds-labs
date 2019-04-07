@@ -408,7 +408,7 @@ int main(int argc, char *argv[])
 	    "Please review these inputs and press <enter> to proceed.\n",
 	    sim_time, msg_arrivalint, msg_size, outoforder_rate*100.0, 
 	    loss_rate*100.0, corrupt_rate*100.0, tracing_level);
-    fgetc(stdin);
+    // fgetc(stdin);
 
     /* initialize the random number generator */
     srand(getpid()+getppid());
