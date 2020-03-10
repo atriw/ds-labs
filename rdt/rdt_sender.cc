@@ -40,6 +40,8 @@ public:
     double start;
 };
 
+#define DEFAULT_TIMEOUT 0.3
+
 template<class K>
 class Vtimer
 {
@@ -61,7 +63,12 @@ public:
         chain.remove_if([&](timerInfo<K> &ti) { return ti.key == key; });
         if (!Sender_isTimerSet() && !chain.empty()) {
             timerInfo<K> first = chain.front();
-            Sender_StartTimer(first.timeout - (GetSimulationTime() - first.start));
+            double timeout = first.timeout - (GetSimulationTime() - first.start);
+            if (timeout > 0) {
+                Sender_StartTimer(timeout);
+            } else {
+                Sender_Timeout();
+            }
         }
     }
 
@@ -70,30 +77,79 @@ public:
     }
 };
 
-Vtimer<seq_t> timer = Vtimer<seq_t>();
+template<int S>
+class Window
+{
+private:
+    packet window[S];
+    int in_window;
+    seq_t expected_ack;
+    seq_t next_seq;
+    Vtimer<seq_t> timer;
+    queue<packet> buffer;
+
+    packet* pop() {
+        in_window--;
+        packet *ret = window + (expected_ack % S);
+        inc_circularly(expected_ack);
+        return ret;
+    }
+
+    bool available() {
+        return in_window < S;
+    }
+
+    int count() {
+        return in_window;
+    }
+
+public:
+    void AckUpTo(seq_t actual_ack) {
+        debug_printf("AckUpTo: expected_ack %d, actual_ack %d, next_seq %d", expected_ack, actual_ack, next_seq);
+        while (between(expected_ack, actual_ack, next_seq)) {
+            timer.Stop(expected_ack);
+            pop();
+        }
+        while (available() && !buffer.empty()) {
+            packet p = buffer.front();
+            buffer.pop();
+            Push(&p);
+        }
+    }
+
+    void Push(packet *pkt) {
+        if (available()) {
+            seq_t seq = *(ref_seq(pkt));
+            debug_printf("Push: send seq %d", seq);
+
+            in_window++;
+            inc_circularly(next_seq);
+            window[seq % S] = *pkt;
+            timer.Start(seq, DEFAULT_TIMEOUT);
+            Sender_ToLowerLayer(pkt);
+        } else {
+            buffer.push(*pkt);
+        }
+    }
+
+    void Timeout() {
+        timer.Timeout();
+        debug_printf("Timeout: count %d, expected_ack %d", count(), expected_ack);
+        seq_t memento = expected_ack;
+        next_seq = expected_ack;
+        for (int i = 0; i < count(); ++i) {
+            Push(pop());
+        }
+        expected_ack = memento;
+    }
+};
 
 #define WINDOW_SIZE 8
-static packet window[WINDOW_SIZE];
-static int in_window = 0;
 
-#define DEFAULT_TIMEOUT 0.3
-
-static queue<packet> buffer = queue<packet>();
-
-// next to send
-static seq_t next_seq = 0;
+Window<8> window = Window<8>();
 
 // extra sequence num in order not to block upper layer
 static seq_t pack_seq = 0;
-
-static seq_t expected_ack = 0;
-
-// acknowledge that expected_ack has been received
-void acknowledge() {
-    in_window--;
-    timer.Stop(expected_ack);
-    inc_circularly(expected_ack);
-}
 
 /* sender initialization, called once at the very beginning */
 void Sender_Init()
@@ -115,21 +171,6 @@ void pack(packet *pkt, seq_t seq, char *payload, int payload_size) {
     *(ref_payload_size(pkt)) = (pls_t)payload_size;
     *(ref_seq(pkt)) = seq;
     *(ref_checksum(pkt)) = sum(pkt);
-}
-
-void send(packet *pkt) {
-    if (in_window < WINDOW_SIZE) {
-        seq_t seq = *(ref_seq(pkt));
-        window[seq % WINDOW_SIZE] = *pkt;
-        in_window++;
-        debug_printf("send seq %d", seq);
-        inc_circularly(next_seq);
-        Sender_ToLowerLayer(pkt);
-        timer.Start(seq, DEFAULT_TIMEOUT);
-    } else {
-        // window is full
-        buffer.push(*pkt);
-    }
 }
 
 /* event handler, called when a message is passed from the upper layer at the 
@@ -157,7 +198,7 @@ void Sender_FromUpperLayer(struct message *msg)
     inc_circularly(pack_seq);
 
 	/* send it out through the lower layer */
-    send(&pkt);
+    window.Push(&pkt);
 
 	/* move the cursor */
 	cursor += MAX_PLS;
@@ -170,7 +211,7 @@ void Sender_FromUpperLayer(struct message *msg)
     inc_circularly(pack_seq);
 
 	/* send it out through the lower layer */
-    send(&pkt);
+    window.Push(&pkt);
     }
 }
 
@@ -182,31 +223,11 @@ void Sender_FromLowerLayer(struct packet *pkt)
         return;
     }
 
-    seq_t actual_ack = *(ref_seq(pkt));
-    debug_printf("receive ack %d, expected %d, next_seq %d", actual_ack, expected_ack, next_seq);
-    while (between(expected_ack, actual_ack, next_seq)) {
-        acknowledge();
-        while (in_window < WINDOW_SIZE && !buffer.empty()) {
-            packet p = buffer.front();
-            buffer.pop();
-            send(&p);
-        }
-    }
-
+    window.AckUpTo(*(ref_seq(pkt)));
 }
 
 /* event handler, called when the timer expires */
 void Sender_Timeout()
 {
-    // cancel all timers
-    timer.Timeout();
-    // resend all non-ack packets in window
-    int count = in_window;
-    in_window = 0;
-
-    seq_t seq = expected_ack;
-    next_seq = seq;
-    for (int i = 0; i < count; ++seq, ++i) {
-        send(window+(seq % WINDOW_SIZE));
-    }
+    window.Timeout();
 }
