@@ -57,51 +57,8 @@ static void pack(packet *pkt, seq_t seq, bool is_nak) {
 template<int S>
 class Handler
 {
-private:
-    struct comparator {
-        bool operator() (const packet &a, const packet &b) {
-            return less_than(get_seq(&a), get_seq(&b), S);
-        }
-    };
-
+protected:
     seq_t expected_seq;
-
-    set<packet, comparator> buffer;
-
-    void flush() {
-        int size = 0;
-        auto last = buffer.begin();
-        for (; last != buffer.end(); ++last) {
-            seq_t seq = get_seq(&(*last));
-            if (seq != expected_seq) {
-                break;
-            }
-            ack(expected_seq, false);
-            size += get_payload_size(&(*last));
-            inc_circularly(expected_seq);
-        }
-        debug_printf("flush: %d packets", distance(buffer.begin(), last));
-        auto fill = [&](message *msg) {
-            int cursor = 0;
-            for (auto it = buffer.begin(); it != last; ++it) {
-                pls_t payload_size = get_payload_size(&(*it));
-                debug_printf("fill msg, seq %d, pls %d", get_seq(&(*it)), get_payload_size(&(*it)));
-                memcpy(msg->data+cursor, it->data+HEADER_SIZE, payload_size);
-                cursor += payload_size;
-            }
-        };
-        upload(size, fill);
-        buffer.erase(buffer.begin(), last);
-    }
-
-    void push(packet *pkt) {
-        debug_printf("push: seq %d", get_seq(pkt));
-        buffer.insert(*pkt);
-        if (get_seq(pkt) == expected_seq) {
-            debug_printf("push: trigger flush");
-            flush();
-        }
-    }
 
     void upload(int size, function<void(message*)> fill) {
         if (size <= 0) {
@@ -115,39 +72,120 @@ private:
         if (msg->data != NULL) free(msg->data);
         if (msg != NULL) free(msg);
     }
-
+    
     void ack(seq_t seq, bool is_nak) {
         packet rsp;
         pack(&rsp, seq, is_nak);
         Receiver_ToLowerLayer(&rsp);
     }
+public:
+    virtual void Handle(packet *pkt) = 0;
+    seq_t Expect() {
+        return expected_seq;
+    }
+};
 
+template<int S>
+class SRHandler : public Handler<S>
+{
+private:
+    struct comparator {
+        bool operator() (const packet &a, const packet &b) {
+            return less_than(get_seq(&a), get_seq(&b), S);
+        }
+    };
+
+    set<packet, comparator> buffer;
+
+    void flush() {
+        int size = 0;
+        auto last = buffer.begin();
+        for (; last != buffer.end(); ++last) {
+            seq_t seq = get_seq(&(*last));
+            if (seq != this->expected_seq) {
+                break;
+            }
+            this->ack(this->expected_seq, false);
+            size += get_payload_size(&(*last));
+            inc_circularly(this->expected_seq);
+        }
+        debug_printf("flush: %d packets", distance(buffer.begin(), last));
+        auto fill = [&](message *msg) {
+            int cursor = 0;
+            for (auto it = buffer.begin(); it != last; ++it) {
+                pls_t payload_size = get_payload_size(&(*it));
+                debug_printf("fill msg, seq %d, pls %d", get_seq(&(*it)), get_payload_size(&(*it)));
+                memcpy(msg->data+cursor, it->data+HEADER_SIZE, payload_size);
+                cursor += payload_size;
+            }
+        };
+        this->upload(size, fill);
+        buffer.erase(buffer.begin(), last);
+    }
+
+    void push(packet *pkt) {
+        debug_printf("push: seq %d", get_seq(pkt));
+        buffer.insert(*pkt);
+        if (get_seq(pkt) == this->expected_seq) {
+            debug_printf("push: trigger flush");
+            flush();
+        }
+    }
 public:
     void Handle(packet *pkt) {
         seq_t seq = get_seq(pkt);
-        if (seq == expected_seq) {
+        if (seq == this->expected_seq) {
             debug_printf("Handle: seq %d as expected", seq);
             push(pkt);
-        } else if (less_than(expected_seq, seq, S)) {
-            debug_printf("Handle: fresher seq %d, send nak of %d", seq, expected_seq);
-            ack(expected_seq, true);
+        } else if (less_than(this->expected_seq, seq, S)) {
+            debug_printf("Handle: fresher seq %d, send nak of %d", seq, this->expected_seq);
+            this->ack(this->expected_seq, true);
             push(pkt);
-        } else if (less_than(seq, expected_seq, S)) {
+        } else if (less_than(seq, this->expected_seq, S)) {
             debug_printf("Handle: stale seq %d, resend ack", seq);
-            ack(seq, false);
+            this->ack(seq, false);
             return;
         } else {
             debug_printf("Handle: seq %d outside of window, drop", seq);
             return;
         }
     }
+};
 
-    seq_t Expect() {
-        return expected_seq;
+template<int S>
+class GBNHandler : public Handler<S>
+{
+private:
+    void push(packet *pkt) {
+        debug_printf("push: seq %d", get_seq(pkt));
+        this->ack(this->expected_seq, false);
+        inc_circularly(this->expected_seq);
+
+        int size = get_payload_size(pkt);
+        auto fill = [&](message *msg) {
+            memcpy(msg->data, pkt->data+HEADER_SIZE, size);
+        };
+        this->upload(size, fill);
+    }
+public:
+    void Handle(packet *pkt) {
+        seq_t seq = get_seq(pkt);
+        if (seq == this->expected_seq) {
+            debug_printf("Handle: seq %d as expected", seq);
+            push(pkt);
+        } else if (less_than(seq, this->expected_seq, S)) {
+            debug_printf("Handle: stale seq %d, resend ack", seq);
+            this->ack(seq, false);
+            return;
+        }
     }
 };
 
-Handler<REC_WINDOW_SIZE> handler = Handler<REC_WINDOW_SIZE>();
+#if GBN
+Handler<REC_WINDOW_SIZE> *handler = new GBNHandler<REC_WINDOW_SIZE>();
+#else
+Handler<REC_WINDOW_SIZE> *handler = new SRHandler<REC_WINDOW_SIZE>();
+#endif
 
 /* event handler, called when a packet is passed from the lower layer at the 
    receiver */
@@ -160,12 +198,12 @@ void Receiver_FromLowerLayer(struct packet *pkt)
     checksum_t checksum = get_checksum(pkt);
     seq_t seq = get_seq(pkt);
     
-    debug_printf("Receiver_FromLowerLayer: seq %d, pls %d, checksum %d, expected %d", seq, payload_size, checksum, handler.Expect());
+    debug_printf("Receiver_FromLowerLayer: seq %d, pls %d, checksum %d, expected %d", seq, payload_size, checksum, handler->Expect());
 
     if (!sanity_check(pkt)) {
         debug_printf("Receiver_FromLowerLayer: drop seq %d", seq);
         return;
     }
 
-    handler.Handle(pkt);
+    handler->Handle(pkt);
 }

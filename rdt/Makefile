@@ -4,10 +4,27 @@
 CCFLAGS = -Wall -g
 LDFLAGS = -Wall -g
 
+GBNFLAG = -DGBN=1
+SRFLAG = -DGBN=0
+
+SRC = $(wildcard *.cc)
+
 # make rules
 TARGETS = rdt_sim 
 
 all: $(TARGETS)
+
+gbn: $(SRC)
+	g++ $(CCFLAGS) $(GBNFLAG) -o $(TARGETS) $^
+
+sr: $(SRC)
+	g++ $(CCFLAGS) $(SRFLAG) -o $(TARGETS) $^
+
+run-gbn-%: gbn
+	./$(TARGETS) 1000 0.1 100 $* $* $* 0
+
+run-sr-%: sr
+	./$(TARGETS) 1000 0.1 100 $* $* $* 0
 
 .cc.o:
 	g++ $(CCFLAGS) -c -o $@ $<

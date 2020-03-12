@@ -84,7 +84,7 @@ public:
 template<int S>
 class Window
 {
-private:
+protected:
     packet window[S];
     int in_window;
     seq_t expected_ack;
@@ -122,14 +122,8 @@ private:
         resend(seq);
     }
 
-public:
-    void Acknowledge(packet *pkt) {
-        seq_t actual = get_seq(pkt);
-        if (is_nak(pkt)) {
-            nak(actual);
-            return;
-        }
-        debug_printf("Acknowledge: expected_ack %d, actual_ack %d, next_seq %d", expected_ack, actual, next_seq);
+    void ack(seq_t actual) {
+        debug_printf("ack: expected_ack %d, actual_ack %d, next_seq %d", expected_ack, actual, next_seq);
         while (between(expected_ack, actual, next_seq)) {
             timer.Stop(expected_ack);
             pop();
@@ -140,6 +134,9 @@ public:
             Push(&p);
         }
     }
+
+public:
+    virtual void Acknowledge(packet *pkt) = 0;
 
     void Push(packet *pkt) {
         if (available()) {
@@ -155,14 +152,55 @@ public:
         }
     }
 
+    virtual void Timeout() = 0;
+};
+
+template<int S>
+class SRWindow : public Window<S>
+{
+public:
+    void Acknowledge(packet *pkt) {
+        seq_t seq = get_seq(pkt);
+        if (is_nak(pkt)) {
+            this->nak(seq);
+        } else {
+            this->ack(seq);
+        }
+    }
+
     void Timeout() {
-        seq_t seq = timer.First();
-        debug_printf("Timeout: seq %d, expected_ack %d", seq, expected_ack);
-        resend(seq);
+        seq_t seq = this->timer.First();
+        debug_printf("Timeout: seq %d, expected_ack %d", seq, this->expected_ack);
+        this->resend(seq);
     }
 };
 
-Window<WINDOW_SIZE> window = Window<WINDOW_SIZE>();
+template<int S>
+class GBNWindow : public Window<S>
+{
+public:
+    void Acknowledge(packet *pkt) {
+        seq_t seq = get_seq(pkt);
+        this->ack(seq);
+    }
+
+    void Timeout() {
+        this->timer.Reset();
+        debug_printf("Timeout: count %d, expected_ack %d", this->count(), this->expected_ack);
+        seq_t memento = this->expected_ack;
+        this->next_seq = this->expected_ack;
+        for (int i = 0; i < this->count(); ++i) {
+            this->Push(this->pop());
+        }
+        this->expected_ack = memento;
+    }
+};
+
+#if GBN
+Window<WINDOW_SIZE> *window = new GBNWindow<WINDOW_SIZE>();
+#else
+Window<WINDOW_SIZE> *window = new SRWindow<WINDOW_SIZE>();
+#endif
 
 // extra sequence num in order not to block upper layer
 static seq_t pack_seq = 0;
@@ -214,7 +252,7 @@ void Sender_FromUpperLayer(struct message *msg)
     inc_circularly(pack_seq);
 
 	/* send it out through the lower layer */
-    window.Push(&pkt);
+    window->Push(&pkt);
 
 	/* move the cursor */
 	cursor += MAX_PLS;
@@ -227,7 +265,7 @@ void Sender_FromUpperLayer(struct message *msg)
     inc_circularly(pack_seq);
 
 	/* send it out through the lower layer */
-    window.Push(&pkt);
+    window->Push(&pkt);
     }
 }
 
@@ -240,11 +278,11 @@ void Sender_FromLowerLayer(struct packet *pkt)
         return;
     }
 
-    window.Acknowledge(pkt);
+    window->Acknowledge(pkt);
 }
 
 /* event handler, called when the timer expires */
 void Sender_Timeout()
 {
-    window.Timeout();
+    window->Timeout();
 }
