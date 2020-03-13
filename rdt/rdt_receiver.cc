@@ -105,9 +105,11 @@ private:
             if (seq != this->expected_seq) {
                 break;
             }
-            this->ack(this->expected_seq, false);
             size += get_payload_size(&(*last));
             inc_circularly(this->expected_seq);
+        }
+        if (last != buffer.begin()) {
+            this->ack(get_seq(&(*prev(last))), false);
         }
         debug_printf("flush: %d packets", distance(buffer.begin(), last));
         auto fill = [&](message *msg) {
