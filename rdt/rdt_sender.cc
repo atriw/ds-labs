@@ -6,8 +6,8 @@
  *       situations.  In this implementation, the packet format is laid out as 
  *       the following:
  *       
- *       |<-  1 byte  ->|<-      4 byte     ->|<-  2 byte  ->|<-        the rest        ->|
- *       | payload size |<- sequence number ->|<- checksum ->|<-        payload         ->|
+ *       |<-  2 byte  ->|<-  1 byte  ->|<-      4 byte     ->|<-        the rest        ->|
+ *       |<- checksum ->| payload size |<- sequence number ->|<-        payload         ->|
  *
  *       The first byte of each packet indicates the size of the payload
  *       (excluding this single-byte header)
@@ -17,201 +17,197 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <queue>
 
 #include "rdt_struct.h"
 #include "rdt_sender.h"
 
-#define WINDOW_SIZE 10
-#define MAX_SEQ 4294967295
-#define DEFAULT_TIMEOUT 0.3
-#define between(a, b, c) (((a <= b) && (b < c)) || ((c < a) && (a <= b)) || ((b < c) && (c < a)))
-#define PAYLOAD_HEADER_SIZE sizeof(char)
-#define SEQ_SIZE sizeof(unsigned int)
-#define CHECKSUM_SIZE sizeof(unsigned short)
-#define get_seq(pkt) (*((seq_nr *)((pkt)->data + PAYLOAD_HEADER_SIZE)))
-#define HEADER_SIZE (PAYLOAD_HEADER_SIZE + SEQ_SIZE + CHECKSUM_SIZE)
+#include <list>
+#include <queue>
 
-typedef unsigned int seq_nr;
+#include "util.h"
 
-//----------------------------------------------------------------
-// DEBUG
-seq_nr getseq(packet *pkt)
-{
-    return get_seq(pkt);
-}
+using namespace std;
 
-//----------------------------------------------------------------
-// vitural timer implemented on one physical timer
-struct vtimer
-{
+template<class K>
+class timerInfo {
+public:
+    timerInfo(K key, double timeout, double start)
+    : key(key), timeout(timeout), start(start) {}
+    K key;
+
+    // in seconds
     double timeout;
     double start;
-    seq_nr num;
-    vtimer *next = NULL;
 };
 
-static vtimer *timer_list = NULL;
-static vtimer *timer_tail = NULL;
+#define DEFAULT_TIMEOUT 0.3
 
-static void destroy(vtimer *p)
+template<class K>
+class Vtimer
 {
-    if (p == NULL) return;
-    destroy(p->next);
-    free(p);
-}
-
-static void append(vtimer *timer) 
-{
-    if (timer_list == NULL) {
-        timer_list = timer_tail = timer;
-    } else {
-        timer_tail->next = timer;
-        timer_tail = timer_tail->next;
-    }
-}
-
-static void pop()
-{
-    if (timer_list) {
-        vtimer *p = timer_list;
-        if (timer_tail == timer_list) 
-            timer_list = timer_tail = NULL;
-        else timer_list = timer_list->next;
-        free(p);
-    }
-}
-
-static vtimer *new_timer(double timeout, seq_nr k)
-{
-    vtimer *p = (vtimer *)malloc(sizeof(*p));
-    p->timeout = timeout;
-    p->start = GetSimulationTime();
-    p->num = k;
-    p->next = NULL;
-    return p;
-}
-
-static void register_timer(double timeout, seq_nr k)
-{
-    vtimer *p = new_timer(timeout, k);
-    append(p);
-    if (!Sender_isTimerSet()) 
-        Sender_StartTimer(timeout);
-}
-
-static void start_timer()
-{
-    ASSERT(timer_list != NULL);
-    double timeout = timer_list->timeout - (GetSimulationTime() - timer_list->start);
-    if (timeout > 0) {
-        Sender_StartTimer(timeout);
-    } else {
-        Sender_Timeout();
-    }
-}
-
-static void stop_timer(seq_nr k)
-{
-    for (vtimer *p=timer_list, *prev=NULL; p; prev = p, p=p->next) {
-        if (p->num == k) {
-            if (p == timer_list) {
-                Sender_StopTimer();
-                pop();
-                if (timer_list) start_timer();
-            } else {
-                prev->next = p->next;
-                free(p);
-            }
-            return;
+private:
+    // assume all timeouts are same, maybe priority_queue?
+    list<timerInfo<K>> chain = list<timerInfo<K>>();
+public:
+    void Start(K key, double timeout) {
+        chain.emplace_back(key, timeout, GetSimulationTime());
+        if (!Sender_isTimerSet()) {
+            Sender_StartTimer(timeout);
         }
     }
-}
 
-//----------------------------------------------------------------
-
-static packet window[WINDOW_SIZE + 1];
-static seq_nr nbuffered = 0;
-static seq_nr seq = 0;
-static seq_nr ack = 0;
-
-static void inc_seq()
-{
-    if (seq < MAX_SEQ) {
-        seq++;
-    } else {
-        seq = 0;
+    void Stop(K key) {
+        if (!chain.empty() && chain.front().key == key) {
+            Sender_StopTimer();
+        }
+        chain.remove_if([&](timerInfo<K> &ti) { return ti.key == key; });
+        if (!Sender_isTimerSet() && !chain.empty()) {
+            timerInfo<K> first = chain.front();
+            double timeout = first.timeout - (GetSimulationTime() - first.start);
+            if (timeout > 0) {
+                Sender_StartTimer(timeout);
+            } else {
+                Sender_Timeout();
+            }
+        }
     }
-}
 
-static void inc_ack()
-{
-    if (ack < MAX_SEQ) {
-        ack++;
-    } else {
-        ack = 0;
+    void Reset() {
+        chain.clear();
     }
-}
-//----------------------------------------------------------------
-// sender buffer
-struct buffer
-{
-    packet pkt;
-    buffer *next = NULL;
+
+    K First() {
+        return chain.front().key;
+    }
 };
 
-static buffer *buffer_list = NULL;
-static buffer *buffer_tail = NULL;
-
-static buffer *buffer_new(packet *pkt)
+template<int S>
+class Window
 {
-    buffer *p = (buffer *)malloc(sizeof(*p));
-    memcpy(&p->pkt, pkt, sizeof(packet));
-    p->next = NULL;
-    return p;
-}
+protected:
+    packet window[S];
+    int in_window;
+    seq_t expected_ack;
+    seq_t next_seq;
+    Vtimer<seq_t> timer;
+    queue<packet> buffer;
 
-static void buffer_push(packet *pkt)
-{
-    buffer *p = buffer_new(pkt);
-    if (buffer_list == NULL) {
-        buffer_list = buffer_tail = p;
-    } else {
-        buffer_tail->next = p;
-        buffer_tail = buffer_tail->next;
+    packet* pop() {
+        in_window--;
+        packet *ret = window + (expected_ack % S);
+        inc_circularly(expected_ack);
+        return ret;
     }
-}
 
-static buffer *buffer_pop()
-{
-    if (buffer_list) {
-        buffer *p = buffer_list;
-        if (buffer_tail == buffer_list) 
-            buffer_list = buffer_tail = NULL;
-        else 
-            buffer_list = buffer_list->next;
-        return p;
+    bool available() {
+        return in_window < S;
     }
-    return NULL;
-}
 
-static unsigned int buffer_count(buffer *list)
-{
-    if (list == NULL) return 0;
-    return 1 + buffer_count(list->next);
-}
+    int count() {
+        return in_window;
+    }
 
-static bool buffer_empty()
+    void resend(seq_t seq) {
+        timer.Stop(seq);
+        timer.Start(seq, DEFAULT_TIMEOUT);
+        Sender_ToLowerLayer(window+(seq % S));
+    }
+
+    void nak(seq_t seq) {
+        if (less_than(seq, expected_ack, S)) {
+            debug_printf("nak: stale nak %d, drop", seq);
+            return;
+        }
+        debug_printf("nak: seq %d, resend", seq);
+        resend(seq);
+    }
+
+    void ack(seq_t actual) {
+        debug_printf("ack: expected_ack %d, actual_ack %d, next_seq %d", expected_ack, actual, next_seq);
+        while (between(expected_ack, actual, next_seq)) {
+            timer.Stop(expected_ack);
+            pop();
+        }
+        while (available() && !buffer.empty()) {
+            packet p = buffer.front();
+            buffer.pop();
+            Push(&p);
+        }
+    }
+
+public:
+    virtual void Acknowledge(packet *pkt) = 0;
+
+    void Push(packet *pkt) {
+        if (available()) {
+            seq_t seq = get_seq(pkt);
+            debug_printf("Push: send seq %d, pls %d, checksum %d", seq, get_payload_size(pkt), get_checksum(pkt));
+            in_window++;
+            inc_circularly(next_seq);
+            window[seq % S] = *pkt;
+            timer.Start(seq, DEFAULT_TIMEOUT);
+            Sender_ToLowerLayer(pkt);
+        } else {
+            buffer.push(*pkt);
+        }
+    }
+
+    virtual void Timeout() = 0;
+};
+
+template<int S>
+class SRWindow : public Window<S>
 {
-    return buffer_list == NULL;
-}
-//----------------------------------------------------------------
+public:
+    void Acknowledge(packet *pkt) {
+        seq_t seq = get_seq(pkt);
+        if (is_nak(pkt)) {
+            this->nak(seq);
+        } else {
+            this->ack(seq);
+        }
+    }
+
+    void Timeout() {
+        seq_t seq = this->timer.First();
+        debug_printf("Timeout: seq %d, expected_ack %d", seq, this->expected_ack);
+        this->resend(seq);
+    }
+};
+
+template<int S>
+class GBNWindow : public Window<S>
+{
+public:
+    void Acknowledge(packet *pkt) {
+        seq_t seq = get_seq(pkt);
+        this->ack(seq);
+    }
+
+    void Timeout() {
+        this->timer.Reset();
+        debug_printf("Timeout: count %d, expected_ack %d", this->count(), this->expected_ack);
+        seq_t memento = this->expected_ack;
+        this->next_seq = this->expected_ack;
+        for (int i = 0; i < this->count(); ++i) {
+            this->Push(this->pop());
+        }
+        this->expected_ack = memento;
+    }
+};
+
+#if GBN
+Window<WINDOW_SIZE> *window = new GBNWindow<WINDOW_SIZE>();
+#else
+Window<WINDOW_SIZE> *window = new SRWindow<WINDOW_SIZE>();
+#endif
+
+// extra sequence num in order not to block upper layer
+static seq_t pack_seq = 0;
+
 /* sender initialization, called once at the very beginning */
 void Sender_Init()
 {
-    nbuffered = 0;
-    seq = 0;
-    ack = 0;
     fprintf(stdout, "At %.2fs: sender initializing ...\n", GetSimulationTime());
 }
 
@@ -223,59 +219,24 @@ void Sender_Final()
 {
     fprintf(stdout, "At %.2fs: sender finalizing ...\n", GetSimulationTime());
 }
-//----------------------------------------------------------------
-static void send(packet *pkt)
-{
-    seq_nr seq_expected = get_seq(pkt);
-    memcpy(window+(seq_expected % WINDOW_SIZE), pkt, sizeof(packet));
-    nbuffered = nbuffered + 1;
-    
-	/* send it out through the lower layer */
-	Sender_ToLowerLayer(window+(seq_expected % WINDOW_SIZE));
-    register_timer(DEFAULT_TIMEOUT, seq_expected);
+
+static void pack(packet *pkt, seq_t seq, char *payload, int payload_size) {
+    memcpy(pkt->data+HEADER_SIZE, payload, payload_size);
+    *(ref_payload_size(pkt)) = (pls_t)payload_size;
+    *(ref_seq(pkt)) = seq;
+    *(ref_checksum(pkt)) = sum(pkt);
 }
 
-static void suspend(packet *pkt)
-{
-    buffer_push(pkt);
-}
-//----------------------------------------------------------------
-static unsigned short gen_checksum(char *buf, int nword)
-{
-    unsigned long sum;
- 
-    for(sum = 0; nword > 0; nword--)
-        sum += *buf++;             
- 
-    sum  = (sum>>16) + (sum&0xffff);
-    sum += (sum>>16);
- 
-    return ~sum;
-}
-
-static bool verify_checksum(char *buf, int nword, unsigned short checksum)
-{
-    unsigned long sum;
- 
-    for(sum = 0; nword > 0; nword--)
-        sum += *buf++;             
- 
-    sum  = (sum>>16) + (sum&0xffff);
-    sum += (sum>>16);
-
-    return (((sum + checksum) & 0xff) == 0xff);
-}
-//----------------------------------------------------------------
 /* event handler, called when a message is passed from the upper layer at the 
    sender */
 void Sender_FromUpperLayer(struct message *msg)
 {
+    debug_printf("Sender_FromUpperLayer: message len %d", msg->size);
     /* 1-byte header indicating the size of the payload */
-    // int header_size = PAYLOAD_HEADER_SIZE + SEQ_SIZE + CHECKSUM_SIZE;
-    
+    // int header_size = sizeof(packet_header);
 
     /* maximum payload size */
-    int maxpayload_size = RDT_PKTSIZE - HEADER_SIZE;
+    // int maxpayload_size = RDT_PKTSIZE - header_size;
 
     /* split the message if it is too big */
 
@@ -285,42 +246,26 @@ void Sender_FromUpperLayer(struct message *msg)
     /* the cursor always points to the first unsent byte in the message */
     int cursor = 0;
 
-    while (msg->size-cursor > maxpayload_size) {
+    while (msg->size-cursor > (int)(MAX_PLS)) {
 	/* fill in the packet */
-	pkt.data[0] = maxpayload_size;
-    *((seq_nr *)(pkt.data + PAYLOAD_HEADER_SIZE)) = seq;
-	memcpy(pkt.data+HEADER_SIZE, msg->data+cursor, maxpayload_size);
-    // set checksum
-    unsigned short cs = gen_checksum(pkt.data+HEADER_SIZE, maxpayload_size);
-    *((unsigned short *)(pkt.data + PAYLOAD_HEADER_SIZE + SEQ_SIZE)) = cs;
+	pack(&pkt, pack_seq, msg->data+cursor, MAX_PLS);
+    inc_circularly(pack_seq);
 
-    if (nbuffered < WINDOW_SIZE) {
-        send(&pkt);
-    } else { // window is full
-        suspend(&pkt);
-    }
-    inc_seq();
+	/* send it out through the lower layer */
+    window->Push(&pkt);
 
 	/* move the cursor */
-	cursor += maxpayload_size;
+	cursor += MAX_PLS;
     }
 
     /* send out the last packet */
     if (msg->size > cursor) {
 	/* fill in the packet */
-	pkt.data[0] = msg->size-cursor;
-    *((seq_nr *)(pkt.data + 1)) = seq;
-	memcpy(pkt.data+HEADER_SIZE, msg->data+cursor, pkt.data[0]);
+	pack(&pkt, pack_seq, msg->data+cursor, msg->size-cursor);
+    inc_circularly(pack_seq);
 
-    unsigned short cs = gen_checksum(pkt.data+HEADER_SIZE, msg->size-cursor);
-    *((unsigned short *)(pkt.data + PAYLOAD_HEADER_SIZE + SEQ_SIZE)) = cs;
-
-    if (nbuffered < WINDOW_SIZE) {
-        send(&pkt);
-    } else {
-        suspend(&pkt);
-    }
-    inc_seq();
+	/* send it out through the lower layer */
+    window->Push(&pkt);
     }
 }
 
@@ -328,34 +273,16 @@ void Sender_FromUpperLayer(struct message *msg)
    sender */
 void Sender_FromLowerLayer(struct packet *pkt)
 {
-    int payload_size = pkt->data[0];
-    unsigned short checksum = *((unsigned short *)(pkt->data + PAYLOAD_HEADER_SIZE + SEQ_SIZE));
-    if (!verify_checksum(pkt->data+HEADER_SIZE, payload_size, checksum))
+    if (!sanity_check(pkt)) {
+        debug_printf("Sender_FromLowerLayer: drop seq %d", get_seq(pkt));
         return;
-
-    seq_nr actual_ack = *((seq_nr *)(pkt->data + 1));
-    while(between(ack, actual_ack, seq)) {
-        nbuffered = nbuffered - 1;
-        while(nbuffered < WINDOW_SIZE && !buffer_empty()){
-            buffer *p = buffer_pop();
-            send(&(p->pkt));
-            free(p);
-        }
-        stop_timer(ack);
-        inc_ack();
     }
+
+    window->Acknowledge(pkt);
 }
 
 /* event handler, called when the timer expires */
 void Sender_Timeout()
 {
-    seq_nr a_seq = ack;
-    if (timer_list) destroy(timer_list);
-    timer_list = timer_tail = NULL;
-    for (seq_nr i = 0; i < nbuffered; i++) {
-        Sender_ToLowerLayer(window + (a_seq % WINDOW_SIZE));
-        register_timer(DEFAULT_TIMEOUT, a_seq);
-        a_seq++;
-    }
+    window->Timeout();
 }
-

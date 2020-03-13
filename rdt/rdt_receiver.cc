@@ -6,8 +6,8 @@
  *       situations.  In this implementation, the packet format is laid out as 
  *       the following:
  *       
- *       |<-  1 byte  ->|<-      4 byte     ->|<-  2 byte  ->|<-        the rest        ->|
- *       | payload size |<- sequence number ->|<- checksum ->|<-        payload         ->|
+ *       |<-  2 byte  ->|<-  1 byte  ->|<-      4 byte     ->|<-        the rest        ->|
+ *       |<- checksum ->| payload size |<- sequence number ->|<-        payload         ->|
  *
  *       The first byte of each packet indicates the size of the payload
  *       (excluding this single-byte header)
@@ -21,156 +21,13 @@
 #include "rdt_struct.h"
 #include "rdt_receiver.h"
 
-typedef unsigned int seq_nr;
-#define MAX_SEQ 4294967295
-#define PAYLOAD_HEADER_SIZE sizeof(char)
-#define SEQ_SIZE sizeof(unsigned int)
-#define CHECKSUM_SIZE sizeof(unsigned short)
-#define get_seq(pkt) (*((seq_nr *)((pkt)->data + PAYLOAD_HEADER_SIZE)))
-#define HEADER_SIZE (PAYLOAD_HEADER_SIZE + SEQ_SIZE + CHECKSUM_SIZE)
+#include "util.h"
 
-struct pkt_node
-{
-    packet pkt;
-    pkt_node *next = NULL;
-};
+#include <set>
+#include <functional>
+#include <iterator>
 
-static seq_nr seq = 0;
-
-static void inc_seq()
-{
-    if (seq < MAX_SEQ) {
-        seq++;
-    } else {
-        seq = 0;
-    }
-}
-
-static int count(pkt_node *list)
-{
-    if (list == NULL) return 0;
-    return 1 + count(list->next);
-}
-
-static unsigned short gen_checksum(char *buf, int nword)
-{
-    unsigned long sum;
- 
-    for(sum = 0; nword > 0; nword--)
-        sum += *buf++;             
- 
-    sum  = (sum>>16) + (sum&0xffff);
-    sum += (sum>>16);
-
-    return ~sum;
-}
-
-static bool verify_checksum(char *buf, int nword, unsigned short checksum)
-{
-    unsigned long sum;
- 
-    for(sum = 0; nword > 0; nword--)
-        sum += *buf++;             
- 
-    sum  = (sum>>16) + (sum&0xffff);
-    sum += (sum>>16);
-
-    return (((sum + checksum) & 0xff) == 0xff);
-}
-
-static pkt_node *pkt_list = NULL;
-static pkt_node *pkt_tail = NULL;
-
-static pkt_node *pkt_new(packet *pkt)
-{
-    pkt_node *node = (pkt_node *)malloc(sizeof(*node));
-    memcpy(&node->pkt, pkt, sizeof(packet));
-    node->next = NULL;
-    return node;
-}
-
-static void suspend(packet *pkt)
-{
-    pkt_node *node = pkt_new(pkt);
-    if (pkt_list == NULL) {
-        pkt_list = pkt_tail = node;
-    } else {
-        for (pkt_node *p=pkt_list, *prev = NULL; p; prev = p, p=p->next) {
-            seq_nr p_seq = *((seq_nr *)(p->pkt.data + 1));
-            seq_nr pkt_seq = *((seq_nr *)(pkt->data + 1));
-            if (pkt_seq == p_seq) {
-                free(node);
-                return;
-            } else if (pkt_seq < p_seq) {
-                node->next = p;
-                if (prev) {
-                    prev->next = node;
-                } else {
-                    pkt_list = node;
-                }
-                return;
-            }
-        }
-        pkt_tail->next = node;
-        pkt_tail = pkt_tail->next;
-    }
-}
-
-static void consume(seq_nr k);
-
-static void send_ack(seq_nr k)
-{
-    packet ack;
-
-    int maxpayload_size = RDT_PKTSIZE - HEADER_SIZE;
-
-    ack.data[0] = maxpayload_size;
-    *((seq_nr *)(ack.data + 1)) = k;
-    memset(ack.data + HEADER_SIZE, 1, maxpayload_size);
-    unsigned short cs = gen_checksum(ack.data+HEADER_SIZE, maxpayload_size);
-    *((unsigned short *)(ack.data + PAYLOAD_HEADER_SIZE + SEQ_SIZE)) = cs;
-    Receiver_ToLowerLayer(&ack);
-}
-
-static void confirm(packet *pkt)
-{
-    /* 1-byte header indicating the size of the payload */
-    int header_size = HEADER_SIZE;
-
-    /* construct a message and deliver to the upper layer */
-    struct message *msg = (struct message*) malloc(sizeof(struct message));
-    ASSERT(msg!=NULL);
-
-    msg->size = pkt->data[0];
-
-    /* sanity check in case the packet is corrupted */
-    if (msg->size<0) msg->size=0;
-    if (msg->size>RDT_PKTSIZE-header_size) msg->size=RDT_PKTSIZE-HEADER_SIZE;
-
-    msg->data = (char*) malloc(msg->size);
-    ASSERT(msg->data!=NULL);
-    memcpy(msg->data, pkt->data+HEADER_SIZE, msg->size);
-    Receiver_ToUpperLayer(msg);
-
-    /* don't forget to free the space */
-    if (msg->data!=NULL) free(msg->data);
-    if (msg!=NULL) free(msg);
-
-    send_ack(seq);
-    inc_seq();
-    consume(seq);
-}
-
-static void consume(seq_nr k)
-{
-    if (pkt_list && (*((seq_nr *)(pkt_list->pkt.data + 1))) == k) {
-        pkt_node *p = pkt_list;
-        pkt_list = pkt_list->next;
-        confirm(&p->pkt);
-        free(p);
-    }
-}
-
+using namespace std;
 
 /* receiver initialization, called once at the very beginning */
 void Receiver_Init()
@@ -187,22 +44,168 @@ void Receiver_Final()
     fprintf(stdout, "At %.2fs: receiver finalizing ...\n", GetSimulationTime());
 }
 
+static void pack(packet *pkt, seq_t seq, bool is_nak) {
+    memset(pkt->data+HEADER_SIZE, 0, ACK_PLS);
+    if (is_nak) {
+        nak(pkt);
+    }
+    *(ref_payload_size(pkt)) = ACK_PLS;
+    *(ref_seq(pkt)) = seq;
+    *(ref_checksum(pkt)) = sum(pkt);
+}
+
+template<int S>
+class Handler
+{
+protected:
+    seq_t expected_seq;
+
+    void upload(int size, function<void(message*)> fill) {
+        if (size <= 0) {
+            return;
+        }
+        message *msg = (message *)malloc(sizeof(message));
+        msg->size = size;
+        msg->data = (char *)malloc(size);
+        fill(msg);
+        Receiver_ToUpperLayer(msg);
+        if (msg->data != NULL) free(msg->data);
+        if (msg != NULL) free(msg);
+    }
+    
+    void ack(seq_t seq, bool is_nak) {
+        packet rsp;
+        pack(&rsp, seq, is_nak);
+        Receiver_ToLowerLayer(&rsp);
+    }
+public:
+    virtual void Handle(packet *pkt) = 0;
+    seq_t Expect() {
+        return expected_seq;
+    }
+};
+
+template<int S>
+class SRHandler : public Handler<S>
+{
+private:
+    struct comparator {
+        bool operator() (const packet &a, const packet &b) {
+            return less_than(get_seq(&a), get_seq(&b), S);
+        }
+    };
+
+    set<packet, comparator> buffer;
+
+    void flush() {
+        int size = 0;
+        auto last = buffer.begin();
+        for (; last != buffer.end(); ++last) {
+            seq_t seq = get_seq(&(*last));
+            if (seq != this->expected_seq) {
+                break;
+            }
+            size += get_payload_size(&(*last));
+            inc_circularly(this->expected_seq);
+        }
+        if (last != buffer.begin()) {
+            this->ack(get_seq(&(*prev(last))), false);
+        }
+        debug_printf("flush: %d packets", distance(buffer.begin(), last));
+        auto fill = [&](message *msg) {
+            int cursor = 0;
+            for (auto it = buffer.begin(); it != last; ++it) {
+                pls_t payload_size = get_payload_size(&(*it));
+                debug_printf("fill msg, seq %d, pls %d", get_seq(&(*it)), get_payload_size(&(*it)));
+                memcpy(msg->data+cursor, it->data+HEADER_SIZE, payload_size);
+                cursor += payload_size;
+            }
+        };
+        this->upload(size, fill);
+        buffer.erase(buffer.begin(), last);
+    }
+
+    void push(packet *pkt) {
+        debug_printf("push: seq %d", get_seq(pkt));
+        buffer.insert(*pkt);
+        if (get_seq(pkt) == this->expected_seq) {
+            debug_printf("push: trigger flush");
+            flush();
+        }
+    }
+public:
+    void Handle(packet *pkt) {
+        seq_t seq = get_seq(pkt);
+        if (seq == this->expected_seq) {
+            debug_printf("Handle: seq %d as expected", seq);
+            push(pkt);
+        } else if (less_than(this->expected_seq, seq, S)) {
+            debug_printf("Handle: fresher seq %d, send nak of %d", seq, this->expected_seq);
+            this->ack(this->expected_seq, true);
+            push(pkt);
+        } else if (less_than(seq, this->expected_seq, S)) {
+            debug_printf("Handle: stale seq %d, resend ack", seq);
+            this->ack(seq, false);
+            return;
+        } else {
+            debug_printf("Handle: seq %d outside of window, drop", seq);
+            return;
+        }
+    }
+};
+
+template<int S>
+class GBNHandler : public Handler<S>
+{
+private:
+    void push(packet *pkt) {
+        debug_printf("push: seq %d", get_seq(pkt));
+        this->ack(this->expected_seq, false);
+        inc_circularly(this->expected_seq);
+
+        int size = get_payload_size(pkt);
+        auto fill = [&](message *msg) {
+            memcpy(msg->data, pkt->data+HEADER_SIZE, size);
+        };
+        this->upload(size, fill);
+    }
+public:
+    void Handle(packet *pkt) {
+        seq_t seq = get_seq(pkt);
+        if (seq == this->expected_seq) {
+            debug_printf("Handle: seq %d as expected", seq);
+            push(pkt);
+        } else if (less_than(seq, this->expected_seq, S)) {
+            debug_printf("Handle: stale seq %d, resend ack", seq);
+            this->ack(seq, false);
+            return;
+        }
+    }
+};
+
+#if GBN
+Handler<REC_WINDOW_SIZE> *handler = new GBNHandler<REC_WINDOW_SIZE>();
+#else
+Handler<REC_WINDOW_SIZE> *handler = new SRHandler<REC_WINDOW_SIZE>();
+#endif
+
 /* event handler, called when a packet is passed from the lower layer at the 
    receiver */
 void Receiver_FromLowerLayer(struct packet *pkt)
 {
-    int payload_size = pkt->data[0];
-    seq_nr actual_seq = *((seq_nr *)(pkt->data + PAYLOAD_HEADER_SIZE));
+    /* 1-byte header indicating the size of the payload */
+    // int header_size = sizeof(packet_header);
 
-    unsigned short checksum = *((unsigned short *)(pkt->data + PAYLOAD_HEADER_SIZE + SEQ_SIZE));
-    if (!verify_checksum(pkt->data+HEADER_SIZE, payload_size, checksum))
+    pls_t payload_size = get_payload_size(pkt);
+    checksum_t checksum = get_checksum(pkt);
+    seq_t seq = get_seq(pkt);
+    
+    debug_printf("Receiver_FromLowerLayer: seq %d, pls %d, checksum %d, expected %d", seq, payload_size, checksum, handler->Expect());
+
+    if (!sanity_check(pkt)) {
+        debug_printf("Receiver_FromLowerLayer: drop seq %d", seq);
         return;
-
-    if (actual_seq > seq) {
-        suspend(pkt);
-    } else if (actual_seq == seq) {
-        confirm(pkt);
-    } else {
-        send_ack(actual_seq);
     }
+
+    handler->Handle(pkt);
 }
